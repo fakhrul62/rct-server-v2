@@ -1,0 +1,29 @@
+services:
+  database:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: rct
+      POSTGRES_USER: rct
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_rct_postgres}
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - rct_identity_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "rct", "-d", "rct"]
+      interval: 2s
+      timeout: 3s
+      retries: 25
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql://rct:${POSTGRES_PASSWORD:-local_rct_postgres}@database:5432/rct
+      JWT_SECRET: ${JWT_SECRET:-}
+      PORT: 3001
+    ports:
+      - "127.0.0.1:3001:3001"
+    depends_on:
+      database:
+        condition: service_healthy
+volumes:
+  rct_identity_data:

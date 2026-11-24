@@ -1,0 +1,35 @@
+{
+  "name": "@rct/identity-api",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node --env-file-if-exists=../.env dist/main.js",
+    "migrate": "node --env-file-if-exists=../.env dist/migrate.js",
+    "seed": "node --env-file-if-exists=../.env dist/seed.js"
+  },
+  "keywords": [],
+  "type": "module",
+  "dependencies": {
+    "@fastify/multipart": "^10.1.9",
+    "@fastify/rate-limit": "^11.3.0",
+    "@fastify/static": "^10.1.12",
+    "@nestjs/common": "^12.6.0",
+    "@nestjs/core": "^12.6.0",
+    "@nestjs/jwt": "^12.0.5",
+    "@nestjs/platform-fastify": "^12.6.0",
+    "@nestjs/swagger": "^12.1.2",
+    "@node-rs/argon2": "^2.2.2",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
+    "fastify": "^5.12.8",
+    "pg": "^8.23.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/pg": "^8.23.1",
+    "typescript": "^6.0.3"
+  }
+}
