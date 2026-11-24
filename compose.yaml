@@ -19,6 +19,10 @@ services:
     environment:
       DATABASE_URL: postgresql://rct:${POSTGRES_PASSWORD:-local_rct_postgres}@database:5432/rct
       JWT_SECRET: ${JWT_SECRET:-}
+      OTP_ENABLED: ${OTP_ENABLED:-false}
+      OTP_SMTP_URL: ${OTP_SMTP_URL:-}
+      OTP_FROM: ${OTP_FROM:-}
+      OTP_PEPPER: ${OTP_PEPPER:-}
       PORT: 3001
     ports:
       - "127.0.0.1:3001:3001"

@@ -11,8 +11,8 @@ export const notify=(tx:Tx, employee:string, request:string, event:string, actor
 export class Notifications {
   constructor(private readonly db:Database) {}
   async list(actor:Actor) {
-    return (await this.db.query(`SELECT id,request_id,event_key,read_at,created_at FROM identity_notifications
-      WHERE employee_id=$1 ORDER BY created_at DESC,id DESC LIMIT 100`,[actor.employeeId])).rows;
+    return (await this.db.query(`SELECT n.uuid AS id,r.uuid AS request_id,n.event_key,n.read_at,n.created_at FROM identity_notifications n
+      JOIN organization_requests r ON r.id=n.request_id WHERE n.employee_id=$1 ORDER BY n.created_at DESC,n.id DESC LIMIT 100`,[actor.employeeId])).rows;
   }
   async read(actor:Actor,id:string) {
     await this.db.transaction(async tx=>{

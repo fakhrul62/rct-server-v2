@@ -1,14 +1,15 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { publicAuditValues, recordTables, uuidFor } from './public-ids.js';
 import pg, { type PoolClient, type QueryResultRow } from 'pg';
 
 export type Tx = Pick<PoolClient, 'query'>;
-export function makePool() {
+export function makePool(schema: "identity" | "identity_live" = "identity") {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
-  return new pg.Pool({ connectionString: process.env.DATABASE_URL, options: '-c search_path=identity,public' });
+  return new pg.Pool({ connectionString: process.env.DATABASE_URL, options: `-c search_path=${schema},public` });
 }
 @Injectable()
 export class Database implements OnModuleDestroy {
-  readonly pool = makePool();
+  readonly pool = makePool("identity_live");
   query<T extends QueryResultRow = QueryResultRow>(sql: string, params: unknown[] = []) {
     return this.pool.query<T>(sql, params);
   }
@@ -29,10 +30,13 @@ export class Database implements OnModuleDestroy {
 export async function audit(db: Tx, actor: string | null, action: string, resource: string,
   record: string | null, before: unknown = null, after: unknown = null, employee: string | null = null,
   context?: { ip?: string; device?: string }) {
+  const table = recordTables[resource];
+  if (!table) throw new Error("Unknown audit resource");
+  const recordUuid = record === null ? null : await uuidFor(db, table, record);
   await db.query(
     `INSERT INTO audit_events(actor_account_id,subject_employee_id,action_key,resource_key,record_id,
       occurred_at,before_values,after_values,source_ip,device_label,created_by,updated_by)
      VALUES ($1,$2,$3,$4,$5,now(),$6,$7,$8,$9,$1,$1)`,
-    [actor, employee, action, resource, record, before, after, context?.ip ?? null, context?.device ?? null],
+    [actor, employee, action, resource, recordUuid, await publicAuditValues(db, table, before), await publicAuditValues(db, table, after), context?.ip ?? null, context?.device ?? null],
   );
 }

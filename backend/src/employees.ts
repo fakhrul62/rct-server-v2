@@ -1,9 +1,10 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
 import { Access, requireRow } from './access.js';
-import { endSessions, hashPassword, type Actor } from './auth.js';
+import { cancelOtp, endSessions, hashPassword, type Actor } from './auth.js';
 import { profileEditFields, profileFields } from './catalog.js';
 import { audit, Database, type Tx } from './database.js';
 import { ActivateDto, EmployeeDto, PaymentDto, ShiftDto } from './dto.js';
+import { publicRow, publicRows } from './public-ids.js';
 import { randomUUID } from 'node:crypto';
 import { documentTypes, type EmployeeFile } from './employee-file.js';
 
@@ -12,11 +13,7 @@ const staff=['ceo','hr'];
 export class Employees {
   constructor(private readonly db:Database, private readonly access:Access) {}
   async list(actor:Actor, offset:number) {
-    const roles=await this.access.roles(actor);
-    const isWide=roles.some(r=>['ceo','dgm','hr'].includes(r));
-    const rows=(await this.db.query(
-      `SELECT id FROM employees WHERE $1::boolean OR id=$2 ORDER BY employee_code LIMIT 50 OFFSET $3`,
-      [isWide,actor.employeeId,offset])).rows;
+    const rows=await this.access.visibleProfiles(actor,offset);
     const items=[];
     for (const row of rows) {
       const fields=await this.access.profileFields(actor,row.id,'read');
@@ -27,13 +24,21 @@ export class Employees {
   async read(actor:Actor, employeeId:string) {
     const fields=await this.access.profileFields(actor,employeeId,'read');
     if (!fields.size) throw new ForbiddenException();
-    const row=await requireRow(this.db.pool,`SELECT id,employee_code,name,email,phone,address,nid,birth_date,photo_ref,
+    const row=await requireRow(this.db.pool,`SELECT id,employee_code,name,first_name,last_name,email,phone,address,nid,birth_date,photo_ref,
       emergency_contact_name,emergency_contact_phone,joined_on,probation_end_on,employment_status,
       executor_subtype,gross_salary,reporting_boss_id,shift_id FROM employees WHERE id=$1`,[employeeId]);
-    return Object.fromEntries(Object.entries(row).filter(([key])=>Object.hasOwn(profileFields,key)&&fields.has(key)));
+    return publicRow(this.db.pool,Object.fromEntries(Object.entries(row).filter(([key])=>Object.hasOwn(profileFields,key)&&fields.has(key))),
+      {id:"employees",reporting_boss_id:"employees",shift_id:"shifts"});
   }
   async add(actor:Actor, body:EmployeeDto) {
     await this.access.require(actor,staff);
+    if ((body.name && (body.firstName || body.lastName)) || (body.lastName && !body.firstName)) {
+      throw new BadRequestException('Supply a full name or firstName and optional lastName');
+    }
+    const [first,...rest]=(body.name??'').trim().split(/\s+/);
+    const firstName=body.firstName?.trim() || first;
+    const lastName=body.lastName?.trim() || rest.join(' ') || null;
+    if (!firstName) throw new BadRequestException('First name is required');
     const password=await hashPassword(body.temporaryPassword);
     return this.db.transaction(async tx=>{
       await this.access.require(actor,staff,tx);
@@ -42,17 +47,17 @@ export class Employees {
           [body.joinedOn,body.probationEndOn])).rows[0].valid;
         if (!valid) throw new BadRequestException('Probation must be between one and six months from joining');
       }
-      const employee=(await tx.query(`INSERT INTO employees(name,email,joined_on,employment_status,probation_end_on,created_by,updated_by,
-          phone,address,nid,birth_date,photo_ref,emergency_contact_name,emergency_contact_phone,executor_subtype)
-        VALUES($1,$2,$3,'pending_onboarding',$4,$5,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+      const employee=(await tx.query(`INSERT INTO employees(first_name,email,joined_on,employment_status,probation_end_on,created_by,updated_by,
+          phone,address,nid,birth_date,photo_ref,emergency_contact_name,emergency_contact_phone,executor_subtype,last_name)
+        VALUES($1,$2,$3,'pending_onboarding',$4,$5,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
         RETURNING id,employee_code,name,employment_status`,
-        [body.name,body.email.trim().toLowerCase(),body.joinedOn,body.probationEndOn??null,actor.accountId,
+        [firstName,body.email.trim().toLowerCase(),body.joinedOn,body.probationEndOn??null,actor.accountId,
           body.phone??null,body.address??null,body.nid??null,body.birthDate??null,body.photoRef??null,
-          body.emergencyContactName??null,body.emergencyContactPhone??null,body.executorSubtype??null])).rows[0];
+          body.emergencyContactName??null,body.emergencyContactPhone??null,body.executorSubtype??null,lastName])).rows[0];
       await tx.query(`INSERT INTO user_accounts(employee_id,password_hash,password_change_status,account_status,created_by,updated_by)
         VALUES($1,$2,'required','pending_activation',$3,$3)`,[employee.id,password,actor.accountId]);
       await audit(tx,actor.accountId,'employee.created','employee',employee.id,null,employee,employee.id);
-      return employee;
+      return publicRow(tx,employee,{id:'employees'});
     });
   }
   private async checkBoss(tx:Tx, employee:string, boss:string) {
@@ -94,6 +99,7 @@ export class Employees {
       await tx.query(`UPDATE user_accounts SET password_hash=$2,password_change_status='required',
         updated_at=now(),updated_by=$3 WHERE id=$1`,[account.id,hash,actor.accountId]);
       await endSessions(tx,account.id,'password_reset',actor.accountId);
+      await cancelOtp(tx,account.id,actor.accountId);
       await audit(tx,actor.accountId,'account.password_reset','account',account.id,null,null,employee);
     });
   }
@@ -131,8 +137,9 @@ export class Employees {
   }
   async orgChart(actor:Actor) {
     await this.access.require(actor,['ceo','hr','dgm','stl','sales_executive','pm','executor']);
-    return (await this.db.query(`SELECT id,name,reporting_boss_id FROM employees WHERE employment_status IN
+    const rows=(await this.db.query(`SELECT id,name,reporting_boss_id FROM employees WHERE employment_status IN
       ('probation','confirmed','exit_pending') ORDER BY name`)).rows;
+    return publicRows(this.db.pool,rows,{id:'employees',reporting_boss_id:'employees'});
   }
   async createShift(actor:Actor, body:ShiftDto) {
     return this.db.transaction(async tx=>{
@@ -141,11 +148,11 @@ export class Employees {
         VALUES($1,$2,$3,$4,'active',$5,$5) RETURNING id,code,name,starts_at,ends_at,status`,
         [body.code,body.name,body.startsAt,body.endsAt,actor.accountId])).rows[0];
       await audit(tx,actor.accountId,'shift.created','shift',shift.id,null,shift);
-      return shift;
+      return publicRow(tx,shift,{id:'shifts'});
     });
   }
   async listShifts() {
-    return (await this.db.query(`SELECT id,code,name,starts_at,ends_at,status FROM shifts ORDER BY code`)).rows;
+    return (await this.db.query(`SELECT uuid AS id,code,name,starts_at,ends_at,status FROM shifts ORDER BY code`)).rows;
   }
   async assignShift(actor:Actor, id:string, shift:string) {
     await this.db.transaction(async tx=>{
@@ -158,7 +165,7 @@ export class Employees {
   }
   async documents(actor:Actor, employee:string) {
     if (actor.employeeId!==employee) await this.access.require(actor,['ceo','hr','dgm']);
-    return (await this.db.query(`SELECT id,document_type,status,file_name,content_type,created_at FROM employee_documents WHERE employee_id=$1 ORDER BY created_at DESC`,[employee])).rows;
+    return (await this.db.query(`SELECT uuid AS id,document_type,status,file_name,content_type,created_at FROM employee_documents WHERE employee_id=$1 ORDER BY created_at DESC`,[employee])).rows;
   }
   async authorizeDocumentUpload(actor:Actor) {
     await this.access.require(actor,staff);
@@ -173,7 +180,7 @@ export class Employees {
         VALUES($1,$2,$3,'active',$4,$4,$5,$6,$7) RETURNING id,document_type,status,file_name,content_type`,
         [employee,type,'db:'+randomUUID(),actor.accountId,file.fileName,file.contentType,file.bytes])).rows[0];
       await audit(tx,actor.accountId,'employee.document_added','employee_document',doc.id,null,doc,employee);
-      return doc;
+      return publicRow(tx,doc,{id:'employee_documents'});
     });
   }
   async downloadDocument(actor:Actor, employee:string, document:string) {
@@ -207,15 +214,18 @@ export class Employees {
       }
       await tx.query('UPDATE user_accounts SET account_status=$2,updated_at=now(),updated_by=$3 WHERE id=$1',
         [account.id,status,actor.accountId]);
-      if (status==='suspended') await endSessions(tx,account.id,'account_disabled',actor.accountId);
+      if (status==='suspended') {
+        await endSessions(tx,account.id,'account_disabled',actor.accountId);
+        await cancelOtp(tx,account.id,actor.accountId);
+      }
       await audit(tx,actor.accountId,'account.status_changed','account',account.id,{status:account.account_status},{status},employee);
     });
   }
   async archiveDocument(actor:Actor,employee:string,id:string) {
     await this.db.transaction(async tx=>{
       await this.access.require(actor,['ceo'],tx);
-      await requireRow(tx,`UPDATE employee_documents SET status='archived',updated_at=now(),updated_by=$3
-        WHERE id=$1 AND employee_id=$2 AND status='active' RETURNING id`,[id,employee,actor.accountId]);
+      await requireRow(tx,`UPDATE identity.employee_documents SET status='archived',deleted_at=now(),updated_at=now(),updated_by=$3
+        WHERE id=$1 AND employee_id=$2 AND status='active' AND deleted_at IS NULL RETURNING id`,[id,employee,actor.accountId]);
       await audit(tx,actor.accountId,'employee.document_archived','employee_document',id,{status:'active'},{status:'archived'},employee);
     });
   }

@@ -36,10 +36,16 @@ const {accessToken:ceo}=await api('POST','/auth/change-password',200,{currentPas
 const me=await api('GET','/auth/me',200,undefined,ceo);
 const roles=await api('GET','/access/roles',200,undefined,ceo);
 const role=(key)=>roles.find(r=>r.key===key).id;
+assert.match(me.employeeId,/^[a-f0-9-]{36}$/i);
+const jwt=JSON.parse(Buffer.from(ceo.split('.')[1],'base64url').toString());
+assert.match(jwt.sub,/^[a-f0-9-]{36}$/i);
+assert.match(jwt.sid,/^[a-f0-9-]{36}$/i);
+await api('GET','/employees/1',400,undefined,ceo);
 async function onboard(key,roleKey,boss) {
   const address=key+'-'+suffix+'@example.test';
   const employee=await api('POST','/employees',201,{name:key,email:address,joinedOn:'2026-11-15',temporaryPassword:starter},ceo);
   assert.match(employee.employee_code,/^RCT-[0-9]{4,}$/);
+  assert.match(employee.id,/^[a-f0-9-]{36}$/i);
   await api('POST','/auth/login',401,{email:address,password:starter});
   await api('POST','/employees/'+employee.id+'/activate',204,{roleId:role(roleKey),reportingBossId:boss},ceo);
   const limited=await api('POST','/auth/login',200,{email:address,password:starter});
@@ -58,6 +64,10 @@ const grant=await api('POST','/access/roles/'+custom.id+'/grants',201,{
 },ceo);
 const phone=catalog.fields.find(f=>f.field_key==='phone');
 await api('PUT','/access/grants/'+grant.id+'/field-policies',200,{resourceFieldId:phone.id,access:'read'},ceo);
+const writeGrant=await api('POST','/access/roles/'+custom.id+'/grants',201,{
+  permissionId:catalog.permissions.find(p=>p.key==='employee_profile.update').id,scope:'own',
+},ceo);
+await api('PUT','/access/grants/'+writeGrant.id+'/field-policies',200,{resourceFieldId:phone.id,access:'write'},ceo);
 const rr=await api('POST','/organization/requests/role-change',201,{
   employeeId:exec.id,roleId:custom.id,operation:'grant',reason:'Verification',
 },hr.accessToken);
@@ -74,6 +84,9 @@ await api('PATCH','/organization/requests/'+rr.id+'/apply',409,{openTasksComplet
 await api('PATCH','/organization/requests/'+rr.id+'/apply',200,{openTasksCompleted:true},ceo);
 const active=await api('GET','/auth/me',200,undefined,exec.accessToken);
 assert.ok(active.roles.includes(custom.key)&&active.roles.includes('sales_executive'));
+await api('PATCH','/employees/'+exec.id+'/profile',200,{field:'phone',value:'01700000000'},exec.accessToken);
+await api('PATCH','/employees/'+exec.id+'/profile',403,{field:'address',value:'Restricted'},exec.accessToken);
+await api('PATCH','/employees/'+hr.id+'/profile',403,{field:'phone',value:'01700000000'},exec.accessToken);
 const pr=await api('POST','/organization/requests/profile-change',201,{field:'phone',value:'0123456789'},exec.accessToken);
 await decision(pr.id,exec.accessToken,403);
 await decision(pr.id,hr.accessToken);
@@ -100,7 +113,10 @@ assert.equal(await api('GET',filePath,200,undefined,exec.accessToken),pdf);
 await api('PATCH',filePath+'/archive',200,undefined,ceo);
 await api('GET',filePath,404,undefined,exec.accessToken);
 await api('GET','/audit',403,undefined,hr.accessToken);
-await api('GET','/audit',200,undefined,ceo);
+const events=await api('GET','/audit',200,undefined,ceo);
+for (const event of events) for (const key of ['id','record_id','actor_account_id','subject_employee_id']) {
+  if (event[key]!==null) assert.match(event[key],/^[a-f0-9-]{36}$/i);
+}
 const rotated=await api('POST','/auth/refresh',200,{refreshToken:exec.refreshToken});
 await api('POST','/auth/refresh',401,{refreshToken:exec.refreshToken});
 await api('GET','/auth/me',401,undefined,rotated.accessToken);

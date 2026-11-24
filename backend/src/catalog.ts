@@ -3,7 +3,7 @@ export const roleCatalog = [
  ['sales_executive','Sales Executive'],['pm','Project Manager'],['executor','Executor'],
 ] as const;
 export const profileFields = {
- id:'internal', employee_code:'internal', name:'public', email:'personal', phone:'personal',
+ id:'internal', employee_code:'internal', name:'public', first_name:'public', last_name:'public', email:'personal', phone:'personal',
  address:'personal', nid:'special_category', birth_date:'personal', photo_ref:'personal',
  emergency_contact_name:'personal', emergency_contact_phone:'personal', joined_on:'internal',
  probation_end_on:'internal', employment_status:'internal', executor_subtype:'internal',

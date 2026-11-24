@@ -8,6 +8,8 @@ import { Database } from './database.js';
 import { Employees } from './employees.js';
 import { RoleManagement } from './roles.js';
 import { Workflow } from './workflow.js';
+import { PublicBodyIds } from './public-id.pipe.js';
+import { OtpDelivery } from './otp-delivery.js';
 import { Notifications } from './notifications.js';
 
 @Module({
@@ -18,6 +20,6 @@ import { Notifications } from './notifications.js';
       verifyOptions:{algorithms:['HS256'],issuer:'rct-erp',audience:'rct-api'}};
   }})],
   controllers:[AuthController,EmployeesController,ShiftsController,AccessController,WorkflowController,AuditController,HealthController,NotificationsController],
-  providers:[Database,AuthService,Access,Employees,RoleManagement,Workflow,Notifications,{provide:APP_GUARD,useClass:AuthGuard}],
+  providers:[Database,AuthService,Access,Employees,RoleManagement,Workflow,Notifications,PublicBodyIds,OtpDelivery,{provide:APP_GUARD,useClass:AuthGuard}],
 })
 export class AppModule {}

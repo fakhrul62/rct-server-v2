@@ -15,11 +15,24 @@ export class Access {
     if (!roles.some(r=>allowed.includes(r))) throw new ForbiddenException();
     return roles;
   }
+  async visibleProfiles(actor:Actor, offset:number) {
+    const result=await this.db.query<{id:string}>(`
+      SELECT e.id FROM employees e WHERE EXISTS (
+        SELECT 1 FROM role_assignments a
+        JOIN roles r ON r.id=a.role_id AND r.status='active'
+        JOIN role_permissions g ON g.role_id=r.id AND g.revoked_at IS NULL
+        JOIN permissions p ON p.id=g.permission_id AND p.status='active'
+        JOIN access_resources ar ON ar.id=p.resource_id AND ar.status='active'
+        JOIN field_policies fp ON fp.role_permission_id=g.id AND fp.revoked_at IS NULL
+        JOIN resource_fields f ON f.id=fp.resource_field_id AND f.resource_id=p.resource_id AND f.status='active'
+        WHERE a.employee_id=$1 AND a.valid_from<=now() AND (a.valid_to IS NULL OR a.valid_to>now())
+          AND p.key='employee_profile.read' AND fp.access_level IN ('read','write')
+          AND (g.record_scope='all' OR (g.record_scope='own' AND e.id=$1))
+      ) ORDER BY e.employee_code LIMIT 50 OFFSET $2`,[actor.employeeId,offset]);
+    return result.rows;
+  }
   async profileFields(actor:Actor, target:string, mode:'read'|'write', tx:Tx=this.db.pool) {
-    const roles=await this.roles(actor,tx);
     const own=target===actor.employeeId;
-    const maySeeAll=roles.some(r=>['ceo','dgm','hr'].includes(r));
-    if ((mode==='write' && !roles.includes('ceo')) || (mode==='read' && !own && !maySeeAll)) throw new ForbiddenException();
     const result=await tx.query<{field_key:string}>(`
       SELECT DISTINCT f.field_key FROM role_assignments a
       JOIN roles r ON r.id=a.role_id AND r.status='active'

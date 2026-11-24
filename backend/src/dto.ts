@@ -1,6 +1,6 @@
 import { applyDecorators } from '@nestjs/common';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsBoolean, IsDateString, IsEmail, IsIn, IsInt, IsNotEmpty, IsNumber, IsOptional, IsString, IsUUID, Length, Max, Min, ValidateIf } from 'class-validator';
+import { IsBoolean, IsDateString, IsEmail, IsIn, IsInt, IsNotEmpty, IsNumber, IsOptional, IsString, IsUUID, Length, Matches, Max, Min, ValidateIf } from 'class-validator';
 
 const Text = (max = 200) => applyDecorators(ApiProperty({ type: String, maxLength: max }), IsString(), IsNotEmpty(), Length(1,max));
 const OptionalText = (max = 200) => applyDecorators(ApiPropertyOptional({ type: String, maxLength: max }), ValidateIf((_o,v)=>v!==undefined), IsString(), Length(1,max));
@@ -17,7 +17,10 @@ export class RefreshDto { @Text(128) refreshToken!:string; }
 export class PasswordDto { @Password() password!:string; }
 export class ChangePasswordDto extends PasswordDto { @Password() currentPassword!:string; }
 export class EmployeeDto {
-  @Text() name!:string; @Email() email!:string;
+  @ApiPropertyOptional({description:'Full name for existing clients. Supply name or firstName.'})
+  @ValidateIf((o,v)=>v!==undefined || o.firstName===undefined) @IsString() @Length(1,200) name?:string;
+  @OptionalText() firstName?:string; @OptionalText() lastName?:string;
+  @Email() email!:string;
   @Day() joinedOn!:string; @Password() temporaryPassword!:string;
   @OptionalDay() probationEndOn?:string;
   @OptionalText(40) phone?:string; @OptionalText(500) address?:string; @OptionalText(50) nid?:string;
@@ -69,4 +72,9 @@ export class RoleUpdateDto {
   @Text(120) name!:string;
   @Text(500) description!:string;
   @ApiProperty({type:'integer',minimum:1}) @IsInt() @Min(1) version!:number;
+}
+
+export class VerifyOtpDto {
+  @Uuid() challengeId!:string;
+  @ApiProperty({type:String,pattern:'^[0-9]{6}$'}) @IsString() @Matches(/^[0-9]{6}$/) code!:string;
 }

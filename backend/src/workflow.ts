@@ -1,9 +1,10 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
 import { Access, requireRow } from './access.js';
-import { endSessions, type Actor } from './auth.js';
+import { cancelOtp, endSessions, type Actor } from './auth.js';
 import { audit, Database, type Tx } from './database.js';
 import type { DecisionDto, DelegationDto, EmploymentRequestDto, PaymentDto, ProfileRequestDto, RoleRequestDto } from './dto.js';
 import { Employees } from './employees.js';
+import { publicRow, publicRows } from './public-ids.js';
 import { notify } from './notifications.js';
 
 const localDay="(now() AT TIME ZONE 'Asia/Dhaka')::date";
@@ -45,7 +46,7 @@ export class Workflow {
       const request=await this.submit(tx,actor,body.employeeId,'role_change',body.reason,[{employee:hr,kind:'recommend'},{employee:ceo,kind:'approve'}]);
       await tx.query(`INSERT INTO role_change_items(request_id,role_id,operation,created_by,updated_by)
         VALUES($1,$2,$3,$4,$4)`,[request.id,body.roleId,body.operation,actor.accountId]);
-      return request;
+      return publicRow(tx,request,{id:'organization_requests',employee_id:'employees'});
     });
   }
   async profileRequest(actor:Actor,body:ProfileRequestDto) {
@@ -63,7 +64,7 @@ export class Workflow {
       const req=await this.submit(tx,actor,actor.employeeId,'profile_change',null,[{employee:approver,kind:'approve'}]);
       await tx.query(`INSERT INTO profile_change_items(request_id,resource_field_id,proposed_value,created_by,updated_by)
         VALUES($1,$2,$3::jsonb,$4,$4)`,[req.id,field.id,JSON.stringify(value),actor.accountId]);
-      return req;
+      return publicRow(tx,req,{id:'organization_requests',employee_id:'employees'});
     });
   }
   async employmentRequest(actor:Actor,body:EmploymentRequestDto) {
@@ -96,12 +97,13 @@ export class Workflow {
         throw new BadRequestException('Probation dates apply only to an extension');
       }
       steps.push({employee:ceo,kind:'approve'});
-      return this.submit(tx,actor,e.id,body.type,body.reason,steps,body.probationOutcome??null,body.proposedProbationEndOn??null);
+      const req=await this.submit(tx,actor,e.id,body.type,body.reason,steps,body.probationOutcome??null,body.proposedProbationEndOn??null);
+      return publicRow(tx,req,{id:'organization_requests',employee_id:'employees'});
     });
   }
   async requests(actor:Actor) {
     const ceo=(await this.access.roles(actor)).includes('ceo');
-    return (await this.db.query(`SELECT r.id,r.employee_id,r.request_type,r.request_status,r.submitted_at
+    const rows=(await this.db.query(`SELECT r.id,r.employee_id,r.request_type,r.request_status,r.submitted_at
       FROM organization_requests r WHERE $1 OR r.employee_id=$2 OR r.requested_by_account_id=$3 OR EXISTS (
         SELECT 1 FROM organization_approval_steps s LEFT JOIN delegations d
         ON d.delegator_employee_id=s.assigned_employee_id AND d.delegate_employee_id=$2 AND d.status='active'
@@ -110,6 +112,7 @@ export class Workflow {
           AND NOT EXISTS (SELECT 1 FROM organization_approval_steps prev WHERE prev.request_id=r.id
             AND prev.step_order<s.step_order AND prev.decision<>'approved'))
       ORDER BY r.submitted_at DESC LIMIT 100`,[ceo,actor.employeeId,actor.accountId])).rows;
+    return publicRows(this.db.pool,rows,{id:'organization_requests',employee_id:'employees'});
   }
   async details(actor:Actor,id:string) {
     const ceo=(await this.access.roles(actor)).includes('ceo');
@@ -123,19 +126,19 @@ export class Workflow {
         WHERE s.request_id=r.id AND (s.assigned_employee_id=$3 OR s.acted_by_account_id=$4 OR d.id IS NOT NULL)
           AND NOT EXISTS (SELECT 1 FROM organization_approval_steps prev WHERE prev.request_id=r.id
             AND prev.step_order<s.step_order AND prev.decision<>'approved')))`,[id,ceo,actor.employeeId,actor.accountId]);
-    const roles=(await this.db.query('SELECT role_id,operation FROM role_change_items WHERE request_id=$1',[id])).rows;
+    const roles=(await this.db.query('SELECT r.uuid AS role_id,i.operation FROM role_change_items i JOIN identity.roles r ON r.id=i.role_id WHERE i.request_id=$1',[id])).rows;
     const fields=(await this.db.query(`SELECT f.field_key,i.proposed_value FROM profile_change_items i
       JOIN resource_fields f ON f.id=i.resource_field_id WHERE i.request_id=$1`,[id])).rows;
     const steps=(await this.db.query(`SELECT step_order,assigned_employee_id,step_kind,decision,decided_at,decision_note
       FROM organization_approval_steps WHERE request_id=$1 ORDER BY step_order`,[id])).rows;
-        return {...req,roles,fields:fields.map(field=>field.field_key==='payment_details' ? {
+        return {...await publicRow(this.db.pool,req,{id:'organization_requests',employee_id:'employees'}),roles,fields:fields.map(field=>field.field_key==='payment_details' ? {
       field_key:field.field_key,
       proposed_value:{
         method:field.proposed_value.method,
         provider:field.proposed_value.provider,
         referenceLastFour:field.proposed_value.accountReference.slice(-4),
       },
-    } : field),steps};
+    } : field),steps:await publicRows(this.db.pool,steps,{assigned_employee_id:'employees'})};
   }
   async decide(actor:Actor,id:string,body:DecisionDto) {
     await this.db.transaction(async tx=>{
@@ -184,8 +187,8 @@ export class Workflow {
     });
   }
   private async setStatus(tx:Tx,id:string,status:string,actor:string) {
-    await tx.query(`UPDATE organization_requests SET request_status=$2::request_status_value,updated_at=now(),updated_by=$3,
-      applied_at=CASE WHEN $2::request_status_value='applied' THEN now() ELSE applied_at END WHERE id=$1`,[id,status,actor]);
+    await tx.query(`UPDATE organization_requests SET request_status=$2::identity.request_status_value,updated_at=now(),updated_by=$3,
+      applied_at=CASE WHEN $2::identity.request_status_value='applied' THEN now() ELSE applied_at END WHERE id=$1`,[id,status,actor]);
   }
   async apply(actor:Actor,id:string,tasksCompleted:boolean) {
     await this.db.transaction(async tx=>{
@@ -230,6 +233,7 @@ export class Workflow {
         const account=await requireRow(tx,'SELECT id FROM user_accounts WHERE employee_id=$1 FOR UPDATE',[req.employee_id]);
         await tx.query(`UPDATE user_accounts SET account_status='closed',updated_at=now(),updated_by=$2 WHERE id=$1`,[account.id,actor.accountId]);
         await endSessions(tx,account.id,'account_disabled',actor.accountId);
+        await cancelOtp(tx,account.id,actor.accountId);
         await tx.query(`UPDATE employees SET employment_status='exited',updated_at=now(),updated_by=$2 WHERE id=$1`,[req.employee_id,actor.accountId]);
         await tx.query(`UPDATE role_assignments SET valid_to=now(),updated_at=now(),updated_by=$2
           WHERE employee_id=$1 AND valid_from<now() AND (valid_to IS NULL OR valid_to>now())`,[req.employee_id,actor.accountId]);
@@ -263,19 +267,20 @@ export class Workflow {
         VALUES($1,$2,'approvals',$3,$4,'active',$5,$6,$6) RETURNING id,delegator_employee_id,delegate_employee_id,starts_on,ends_on,status`,
         [body.delegatorEmployeeId,body.delegateEmployeeId,body.startsOn,body.endsOn,body.reason,actor.accountId])).rows[0];
       await audit(tx,actor.accountId,'organization.delegation_created','delegation',row.id,null,row,body.delegatorEmployeeId);
-      return row;
+      return publicRow(tx,row,{id:'delegations',delegator_employee_id:'employees',delegate_employee_id:'employees'});
     });
   }
   async listDelegations(actor:Actor) {
     const ceo=(await this.access.roles(actor)).includes('ceo');
-    return (await this.db.query(`SELECT id,delegator_employee_id,delegate_employee_id,scope,starts_on,ends_on,status
+    const rows=(await this.db.query(`SELECT id,delegator_employee_id,delegate_employee_id,scope,starts_on,ends_on,status
       FROM delegations WHERE $1 OR delegator_employee_id=$2 OR delegate_employee_id=$2 ORDER BY starts_on DESC LIMIT 100`,[ceo,actor.employeeId])).rows;
+    return publicRows(this.db.pool,rows,{id:'delegations',delegator_employee_id:'employees',delegate_employee_id:'employees'});
   }
   async archiveDelegation(actor:Actor,id:string) {
     await this.db.transaction(async tx=>{
       await this.access.require(actor,['ceo'],tx);
-      const row=await requireRow(tx,`UPDATE delegations SET status='archived',updated_at=now(),updated_by=$2
-        WHERE id=$1 AND status='active' RETURNING id,delegator_employee_id`,[id,actor.accountId]);
+      const row=await requireRow(tx,`UPDATE identity.delegations SET status='archived',deleted_at=now(),updated_at=now(),updated_by=$2
+        WHERE id=$1 AND status='active' AND deleted_at IS NULL RETURNING id,delegator_employee_id`,[id,actor.accountId]);
       await audit(tx,actor.accountId,'organization.delegation_archived','delegation',id,{status:'active'},{status:'archived'},row.delegator_employee_id);
     });
   }
